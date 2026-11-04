@@ -1,0 +1,8 @@
+{
+  "name":"sey-gamerz-crypto-bash",
+  "version":"1.0.0",
+  "description":"SEY GAMERZ Crypto Bash multiplayer simulated crypto trading game",
+  "main":"server.js",
+  "scripts":{"start":"node server.js"},
+  "dependencies":{"express":"^4.21.2","socket.io":"^4.8.1"}
+}
