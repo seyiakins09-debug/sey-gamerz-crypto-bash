@@ -27,3 +27,11 @@ The host view omits the player trading terminal and personal portfolio summary. 
 ## Deploy
 
 Use `npm install` as the build/install command and `npm start` as the start command on a Node.js web service. The server listens on the `PORT` environment variable supplied by the host platform.
+## Player reconnection
+
+- If a phone call or temporary network interruption disconnects a player, the room keeps that player's game record instead of removing it.
+- The browser automatically attempts to rejoin when its Socket.IO connection returns.
+- If the player refreshes or reopens the game, use the **same room key and exact same nickname** to rejoin. The original player number, virtual cash, holdings, trade history, and progress are restored.
+- A returning player does not need to re-enter starting capital; the saved original amount is kept.
+- The host and leaderboard can see whether a player is online or disconnected.
+- Reconnection works while the game server and room are still running. A server restart or an ended room cannot restore an in-memory room.

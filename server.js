@@ -71,7 +71,8 @@ function roomState(room) {
       portfolio: portfolio(player, room),
       netWorth: worth,
       profit: worth - player.startingCash,
-      trades: player.trades.slice(-8)
+      trades: player.trades.slice(-8),
+      connected: player.connected !== false
     };
   });
 
@@ -150,21 +151,43 @@ io.on("connection", socket => {
 
     const nickname = (name || "Player").trim().slice(0, 24) || "Player";
     const capital = Number(startingCash);
-    if (!Number.isFinite(capital) || capital <= 0 || capital > MAX_STARTING_CASH) {
-      return fail(socket, "Enter a valid starting amount greater than zero.");
-    }
+    const normalizedName = nickname.toLocaleLowerCase();
+    const existingEntry = Object.entries(room.players).find(([, player]) =>
+      player.name.toLocaleLowerCase() === normalizedName
+    );
 
-    const id = socket.id;
-    const playerNumber = room.nextPlayerNumber++;
-    room.players[id] = {
-      id,
-      playerNumber,
-      name: nickname,
-      startingCash: capital,
-      cash: capital,
-      holdings: { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 },
-      trades: []
-    };
+    let player;
+    let reconnected = false;
+    if (existingEntry) {
+      const [oldId, existing] = existingEntry;
+      if (existing.connected) {
+        return fail(socket, "That player name is already connected. If this is your account, wait a moment and try again.");
+      }
+      delete room.players[oldId];
+      player = existing;
+      player.id = socket.id;
+      player.connected = true;
+      room.players[socket.id] = player;
+      reconnected = true;
+    } else {
+      if (!Number.isFinite(capital) || capital <= 0 || capital > MAX_STARTING_CASH) {
+        return fail(socket, "Enter a valid starting amount greater than zero for a new player.");
+      }
+      if (Object.keys(room.players).length >= 50) {
+        return fail(socket, "Room is full (50 players maximum).");
+      }
+      player = {
+        id: socket.id,
+        playerNumber: room.nextPlayerNumber++,
+        name: nickname,
+        startingCash: capital,
+        cash: capital,
+        holdings: { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 },
+        trades: [],
+        connected: true
+      };
+      room.players[socket.id] = player;
+    }
 
     socket.join(key);
     socket.data.room = key;
@@ -172,9 +195,10 @@ io.on("connection", socket => {
     socket.emit("joined", {
       role: "player",
       key,
-      name: nickname,
-      playerNumber,
-      startingCash: capital
+      name: player.name,
+      playerNumber: player.playerNumber,
+      startingCash: player.startingCash,
+      reconnected
     });
     emitRoom(room);
   });
@@ -289,7 +313,8 @@ io.on("connection", socket => {
     const room = rooms[socket.data.room];
     if (!room) return;
     if (socket.data.role === "player" && room.players[socket.id]) {
-      delete room.players[socket.id];
+      room.players[socket.id].connected = false;
+      room.players[socket.id].disconnectedAt = Date.now();
       emitRoom(room);
     }
   });
