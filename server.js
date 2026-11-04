@@ -160,13 +160,21 @@ io.on("connection", socket => {
     let reconnected = false;
     if (existingEntry) {
       const [oldId, existing] = existingEntry;
-      if (existing.connected) {
-        return fail(socket, "That player name is already connected. If this is your account, wait a moment and try again.");
-      }
+
+      // A reconnect may arrive before the server has received the old
+      // socket's disconnect event (for example after a phone call or
+      // network handoff). Treat the room key + exact nickname as the
+      // player's resume identity and replace the stale socket session.
       delete room.players[oldId];
+      const oldSocket = io.sockets.sockets.get(oldId);
+      if (oldSocket && oldId !== socket.id) {
+        oldSocket.disconnect(true);
+      }
+
       player = existing;
       player.id = socket.id;
       player.connected = true;
+      delete player.disconnectedAt;
       room.players[socket.id] = player;
       reconnected = true;
     } else {

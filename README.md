@@ -35,3 +35,10 @@ Use `npm install` as the build/install command and `npm start` as the start comm
 - A returning player does not need to re-enter starting capital; the saved original amount is kept.
 - The host and leaderboard can see whether a player is online or disconnected.
 - Reconnection works while the game server and room are still running. A server restart or an ended room cannot restore an in-memory room.
+
+
+## Reconnection fix (updated)
+- Fixed a startup bug where saved reconnect details could trigger a JavaScript error before the page initialized.
+- Rejoining with the same room key and nickname now resumes the existing player even if the server has not yet processed the old socket's disconnect event.
+- The old socket is replaced, while the original player number, virtual cash, holdings, trade history, and starting capital are retained.
+- Reconnection requires the same running server process and an active room. Since room/player data is stored in server memory, a Render restart or game end still clears the room state.
