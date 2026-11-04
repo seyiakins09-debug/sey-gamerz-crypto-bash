@@ -1,74 +1,298 @@
-const express=require("express"), http=require("http"), {Server}=require("socket.io");
-const app=express(), server=http.createServer(app), io=new Server(server);
+const express = require("express");
+const http = require("http");
+const { Server } = require("socket.io");
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server);
 app.use(express.static("public"));
-const PORT=process.env.PORT||3000;
-const STARTING_CASH=500000, ROUND_MS=10*60*1000;
-const COINS={
- BTC:{name:"Bitcoin",symbol:"BTC",price:65000,vol:0.018},
- ETH:{name:"Ethereum",symbol:"ETH",price:3400,vol:0.025},
- SOL:{name:"Solana",symbol:"SOL",price:165,vol:0.04},
- DOGE:{name:"Dogecoin",symbol:"DOGE",price:0.18,vol:0.055}
+
+const PORT = process.env.PORT || 3000;
+const ROUND_MS = 20 * 60 * 1000;
+const MAX_STARTING_CASH = Number.MAX_SAFE_INTEGER;
+const MAX_TRADE_FEED = 250;
+
+const COINS = {
+  BTC: { name: "Bitcoin", symbol: "BTC", price: 65000, vol: 0.018 },
+  ETH: { name: "Ethereum", symbol: "ETH", price: 3400, vol: 0.025 },
+  SOL: { name: "Solana", symbol: "SOL", price: 165, vol: 0.04 },
+  DOGE: { name: "Dogecoin", symbol: "DOGE", price: 0.18, vol: 0.055 }
 };
-let rooms={};
-function newRoom(key,hostId){
- let coins={}; for(const [k,v] of Object.entries(COINS)) coins[k]={...v,price:v.price,history:[v.price]};
- return rooms[key]={key,hostId,hostName:"HOST",players:{},set:1,round:1,started:false,paused:false,ended:false,deadline:null,remaining:ROUND_MS,coins,interval:null};
+
+const rooms = {};
+
+function newRoom(key, hostId) {
+  const coins = {};
+  for (const [symbol, coin] of Object.entries(COINS)) {
+    coins[symbol] = { ...coin, history: [coin.price] };
+  }
+
+  return (rooms[key] = {
+    key,
+    hostId,
+    hostName: "HOST",
+    players: {},
+    nextPlayerNumber: 1,
+    tradeFeed: [],
+    tradeCount: 0,
+    set: 1,
+    round: 1,
+    started: false,
+    paused: false,
+    ended: false,
+    deadline: null,
+    remaining: ROUND_MS,
+    coins,
+    interval: null
+  });
 }
-function roomState(r){
- const players=Object.values(r.players).map(p=>({id:p.id,name:p.name,cash:p.cash,holdings:p.holdings,portfolio:portfolio(p,r),netWorth:netWorth(p,r),profit:netWorth(p,r)-STARTING_CASH, trades:p.trades.slice(-8)}));
- return {key:r.key,set:r.set,round:r.round,started:r.started,paused:r.paused,ended:r.ended,remaining:r.started&&!r.paused&&!r.ended?Math.max(0,r.deadline-Date.now()):r.remaining,coins:r.coins,players,startingCash:STARTING_CASH};
+
+function portfolio(player, room) {
+  return Object.entries(player.holdings).reduce(
+    (total, [symbol, quantity]) => total + quantity * room.coins[symbol].price,
+    0
+  );
 }
-function portfolio(p,r){return Object.entries(p.holdings).reduce((s,[k,q])=>s+q*r.coins[k].price,0)}
-function netWorth(p,r){return p.cash+portfolio(p,r)}
-function emitRoom(r){io.to(r.key).emit("state",roomState(r))}
-function tick(r){
- if(!r.started||r.paused||r.ended)return;
- const now=Date.now();
- for(const [k,c] of Object.entries(r.coins)){
-   const drift=(Math.random()-.49)*c.vol;
-   const jump=(Math.random()<.025?(Math.random()-.5)*c.vol*3:0);
-   c.price=Math.max(c.price*.02,c.price*(1+drift+jump));
-   c.history.push(c.price); if(c.history.length>90)c.history.shift();
- }
- r.remaining=Math.max(0,r.deadline-now);
- if(r.remaining<=0){r.ended=true;r.started=false;clearInterval(r.interval);r.interval=null;io.to(r.key).emit("roundEnd",roomState(r))}
- emitRoom(r);
+
+function netWorth(player, room) {
+  return player.cash + portfolio(player, room);
 }
-function fail(s,msg){s.emit("notice",{type:"error",message:msg})}
-io.on("connection",s=>{
- s.on("createRoom",({name})=>{
-  let key; do{key=Math.random().toString(36).slice(2,7).toUpperCase()}while(rooms[key]);
-  const r=newRoom(key,s.id);r.hostName=(name||"Host").trim().slice(0,24)||"Host";s.join(key);s.data.room=key;s.data.role="host";
-  s.emit("joined",{role:"host",key,name:r.hostName,startingCash:STARTING_CASH});emitRoom(r);
- });
- s.on("joinRoom",({key,name})=>{
-  key=(key||"").trim().toUpperCase();const r=rooms[key];if(!r)return fail(s,"Room key not found.");
-  if(r.ended)return fail(s,"This game has ended.");
-  if(Object.keys(r.players).length>=50)return fail(s,"Room is full (50 players maximum).");
-  const nickname=(name||"Player").trim().slice(0,24)||"Player";
-  const id=s.id;r.players[id]={id,name:nickname,cash:STARTING_CASH,holdings:{BTC:0,ETH:0,SOL:0,DOGE:0},trades:[]};
-  s.join(key);s.data.room=key;s.data.role="player";s.emit("joined",{role:"player",key,name:nickname,startingCash:STARTING_CASH});emitRoom(r);
- });
- s.on("hostAction",({action,value})=>{
-  const r=rooms[s.data.room];if(!r||s.data.role!=="host"||r.hostId!==s.id)return;
-  if(action==="start"){if(r.ended)return;r.started=true;r.paused=false;r.deadline=Date.now()+r.remaining;if(!r.interval)r.interval=setInterval(()=>tick(r),1000)}
-  if(action==="pause"&&r.started&&!r.paused){r.remaining=Math.max(0,r.deadline-Date.now());r.paused=true}
-  if(action==="resume"&&r.started&&r.paused){r.paused=false;r.deadline=Date.now()+r.remaining}
-  if(action==="next"||action==="set"){if(r.interval){clearInterval(r.interval);r.interval=null}r.set=action==="set"?Math.min(10,Math.max(1,Number(value)||1)):Math.min(10,r.set+1);r.round=r.set;r.started=false;r.paused=false;r.ended=false;r.remaining=ROUND_MS;r.deadline=null}
-  if(action==="end"){r.ended=true;r.started=false;r.paused=false;if(r.interval)clearInterval(r.interval);r.interval=null}
-  emitRoom(r);
- });
- s.on("trade",({side,symbol,quantity})=>{
-  const r=rooms[s.data.room],p=r&&r.players[s.id];if(!r||!p||s.data.role!=="player")return;
-  if(!r.started||r.paused||r.ended)return fail(s,"Trading is available only while the round is running.");
-  const c=r.coins[symbol],q=Number(quantity);if(!c||!Number.isFinite(q)||q<=0||q>1e12)return fail(s,"Enter a valid quantity.");
-  const cost=q*c.price;
-  if(side==="buy"){if(cost>p.cash+0.00001)return fail(s,"Not enough available game coins.");p.cash-=cost;p.holdings[symbol]+=q}
-  else if(side==="sell"){if(q>p.holdings[symbol]+1e-10)return fail(s,"You don't own enough of this crypto.");p.holdings[symbol]-=q;p.cash+=cost}
-  else return;
-  p.trades.push({side,symbol,quantity:q,price:c.price,total:cost,time:new Date().toISOString()});
-  io.to(r.key).emit("tradeNotice",{player:p.name,side,symbol,quantity:q,price:c.price});emitRoom(r);
- });
- s.on("disconnect",()=>{const r=rooms[s.data.room];if(!r)return;if(s.data.role==="player"&&r.players[s.id]){delete r.players[s.id];emitRoom(r)}});
+
+function roomState(room) {
+  const players = Object.values(room.players).map(player => {
+    const worth = netWorth(player, room);
+    return {
+      id: player.id,
+      playerNumber: player.playerNumber,
+      name: player.name,
+      startingCash: player.startingCash,
+      cash: player.cash,
+      holdings: player.holdings,
+      portfolio: portfolio(player, room),
+      netWorth: worth,
+      profit: worth - player.startingCash,
+      trades: player.trades.slice(-8)
+    };
+  });
+
+  return {
+    key: room.key,
+    set: room.set,
+    round: room.round,
+    started: room.started,
+    paused: room.paused,
+    ended: room.ended,
+    remaining:
+      room.started && !room.paused && !room.ended
+        ? Math.max(0, room.deadline - Date.now())
+        : room.remaining,
+    coins: room.coins,
+    players,
+    tradeFeed: room.tradeFeed
+  };
+}
+
+function emitRoom(room) {
+  io.to(room.key).emit("state", roomState(room));
+}
+
+function fail(socket, message) {
+  socket.emit("notice", { type: "error", message });
+}
+
+function tick(room) {
+  if (!room.started || room.paused || room.ended) return;
+
+  const now = Date.now();
+  for (const coin of Object.values(room.coins)) {
+    const drift = (Math.random() - 0.49) * coin.vol;
+    const jump = Math.random() < 0.025 ? (Math.random() - 0.5) * coin.vol * 3 : 0;
+    coin.price = Math.max(coin.price * 0.02, coin.price * (1 + drift + jump));
+    coin.history.push(coin.price);
+    if (coin.history.length > 90) coin.history.shift();
+  }
+
+  room.remaining = Math.max(0, room.deadline - now);
+  if (room.remaining <= 0) {
+    room.ended = true;
+    room.started = false;
+    clearInterval(room.interval);
+    room.interval = null;
+    io.to(room.key).emit("roundEnd", roomState(room));
+  }
+  emitRoom(room);
+}
+
+io.on("connection", socket => {
+  socket.on("createRoom", ({ name } = {}) => {
+    let key;
+    do {
+      key = Math.random().toString(36).slice(2, 7).toUpperCase();
+    } while (rooms[key]);
+
+    const room = newRoom(key, socket.id);
+    room.hostName = (name || "Host").trim().slice(0, 24) || "Host";
+    socket.join(key);
+    socket.data.room = key;
+    socket.data.role = "host";
+    socket.emit("joined", { role: "host", key, name: room.hostName });
+    emitRoom(room);
+  });
+
+  socket.on("joinRoom", ({ key, name, startingCash } = {}) => {
+    key = (key || "").trim().toUpperCase();
+    const room = rooms[key];
+    if (!room) return fail(socket, "Room key not found.");
+    if (room.ended) return fail(socket, "This game has ended.");
+    if (Object.keys(room.players).length >= 50) {
+      return fail(socket, "Room is full (50 players maximum).");
+    }
+
+    const nickname = (name || "Player").trim().slice(0, 24) || "Player";
+    const capital = Number(startingCash);
+    if (!Number.isFinite(capital) || capital <= 0 || capital > MAX_STARTING_CASH) {
+      return fail(socket, "Enter a valid starting amount greater than zero.");
+    }
+
+    const id = socket.id;
+    const playerNumber = room.nextPlayerNumber++;
+    room.players[id] = {
+      id,
+      playerNumber,
+      name: nickname,
+      startingCash: capital,
+      cash: capital,
+      holdings: { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 },
+      trades: []
+    };
+
+    socket.join(key);
+    socket.data.room = key;
+    socket.data.role = "player";
+    socket.emit("joined", {
+      role: "player",
+      key,
+      name: nickname,
+      playerNumber,
+      startingCash: capital
+    });
+    emitRoom(room);
+  });
+
+  socket.on("hostAction", ({ action, value } = {}) => {
+    const room = rooms[socket.data.room];
+    if (!room || socket.data.role !== "host" || room.hostId !== socket.id) return;
+
+    if (action === "start") {
+      if (room.ended) return;
+      room.started = true;
+      room.paused = false;
+      room.deadline = Date.now() + room.remaining;
+      if (!room.interval) room.interval = setInterval(() => tick(room), 1000);
+    }
+
+    if (action === "pause" && room.started && !room.paused) {
+      room.remaining = Math.max(0, room.deadline - Date.now());
+      room.paused = true;
+    }
+
+    if (action === "resume" && room.started && room.paused) {
+      room.paused = false;
+      room.deadline = Date.now() + room.remaining;
+    }
+
+    if (action === "next" || action === "set") {
+      if (room.interval) clearInterval(room.interval);
+      room.interval = null;
+      room.set = action === "set"
+        ? Math.min(10, Math.max(1, Number(value) || 1))
+        : Math.min(10, room.set + 1);
+      room.round = room.set;
+      room.started = false;
+      room.paused = false;
+      room.ended = false;
+      room.remaining = ROUND_MS;
+      room.deadline = null;
+    }
+
+    if (action === "end") {
+      room.ended = true;
+      room.started = false;
+      room.paused = false;
+      if (room.interval) clearInterval(room.interval);
+      room.interval = null;
+    }
+
+    emitRoom(room);
+  });
+
+  socket.on("trade", ({ side, symbol, quantity } = {}) => {
+    const room = rooms[socket.data.room];
+    const player = room && room.players[socket.id];
+    if (!room || !player || socket.data.role !== "player") return;
+    if (!room.started || room.paused || room.ended) {
+      return fail(socket, "Trading is available only while the round is running.");
+    }
+
+    const coin = room.coins[symbol];
+    const amount = Number(quantity);
+    if (!coin || !Number.isFinite(amount) || amount <= 0 || amount > 1e12) {
+      return fail(socket, "Enter a valid quantity.");
+    }
+
+    const total = amount * coin.price;
+    if (!Number.isFinite(total)) return fail(socket, "That trade amount is too large.");
+
+    if (side === "buy") {
+      if (total > player.cash + 0.00001) return fail(socket, "Not enough available game coins.");
+      player.cash -= total;
+      player.holdings[symbol] += amount;
+    } else if (side === "sell") {
+      if (amount > player.holdings[symbol] + 1e-10) {
+        return fail(socket, "You don't own enough of this crypto.");
+      }
+      player.holdings[symbol] -= amount;
+      player.cash += total;
+    } else {
+      return;
+    }
+
+    const trade = {
+      tradeNumber: ++room.tradeCount,
+      playerNumber: player.playerNumber,
+      player: player.name,
+      side,
+      symbol,
+      quantity: amount,
+      price: coin.price,
+      total,
+      time: new Date().toISOString(),
+      cashAfter: player.cash,
+      netWorthAfter: netWorth(player, room)
+    };
+    player.trades.push(trade);
+    room.tradeFeed.push(trade);
+    if (room.tradeFeed.length > MAX_TRADE_FEED) room.tradeFeed.shift();
+
+    io.to(room.key).emit("tradeNotice", {
+      player: player.name,
+      side,
+      symbol,
+      quantity: amount,
+      price: coin.price,
+      total
+    });
+    emitRoom(room);
+  });
+
+  socket.on("disconnect", () => {
+    const room = rooms[socket.data.room];
+    if (!room) return;
+    if (socket.data.role === "player" && room.players[socket.id]) {
+      delete room.players[socket.id];
+      emitRoom(room);
+    }
+  });
 });
-server.listen(PORT,()=>console.log("Crypto Bash running on "+PORT));
+
+server.listen(PORT, () => console.log("Crypto Bash running on " + PORT));
