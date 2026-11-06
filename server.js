@@ -20,6 +20,7 @@ const COINS = {
 };
 
 const rooms = {};
+const fmtReward = value => `$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 
 function newRoom(key, hostId) {
   const coins = {};
@@ -54,13 +55,38 @@ function portfolio(player, room) {
   );
 }
 
-function netWorth(player, room) {
-  return player.cash + portfolio(player, room);
+function holdingDetails(player, room) {
+  return Object.entries(player.holdings).map(([symbol, quantity]) => {
+    const basis = player.costBasis[symbol] || 0;
+    const marketValue = quantity * room.coins[symbol].price;
+    return {
+      symbol,
+      quantity,
+      averageCost: quantity > 0 ? basis / quantity : 0,
+      costBasis: basis,
+      currentPrice: room.coins[symbol].price,
+      marketValue,
+      unrealizedProfitLoss: marketValue - basis
+    };
+  });
+}
+
+// Wealth follows the agreed SEY GAMERZ accounting model:
+// cash + current crypto value + realized profit + separate rewards.
+// Realized losses have already reduced cash, so they are not subtracted again.
+function totalWealth(player, room) {
+  return player.cash + portfolio(player, room) + player.totalProfit + player.rewardsEarned;
 }
 
 function roomState(room) {
   const players = Object.values(room.players).map(player => {
-    const worth = netWorth(player, room);
+    // Compatibility defaults for players reconnecting to an older room state.
+    player.costBasis ||= { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 };
+    player.totalProfit ||= 0;
+    player.totalLoss ||= 0;
+    player.rewardsEarned ||= 0;
+    const cryptoValue = portfolio(player, room);
+    const worth = totalWealth(player, room);
     return {
       id: player.id,
       playerNumber: player.playerNumber,
@@ -68,11 +94,15 @@ function roomState(room) {
       startingCash: player.startingCash,
       cash: player.cash,
       holdings: player.holdings,
-      portfolio: portfolio(player, room),
+      holdingDetails: holdingDetails(player, room),
+      portfolio: cryptoValue,
+      totalProfit: player.totalProfit,
+      totalLoss: player.totalLoss,
+      rewardsEarned: player.rewardsEarned,
+      totalWealth: worth,
       netWorth: worth,
       profit: worth - player.startingCash,
-      trades: player.trades.slice(-8),
-      connected: player.connected !== false
+      trades: player.trades.slice(-50)
     };
   });
 
@@ -151,51 +181,21 @@ io.on("connection", socket => {
 
     const nickname = (name || "Player").trim().slice(0, 24) || "Player";
     const capital = Number(startingCash);
-    const normalizedName = nickname.toLocaleLowerCase();
-    const existingEntry = Object.entries(room.players).find(([, player]) =>
-      player.name.toLocaleLowerCase() === normalizedName
-    );
-
-    let player;
-    let reconnected = false;
-    if (existingEntry) {
-      const [oldId, existing] = existingEntry;
-
-      // A reconnect may arrive before the server has received the old
-      // socket's disconnect event (for example after a phone call or
-      // network handoff). Treat the room key + exact nickname as the
-      // player's resume identity and replace the stale socket session.
-      delete room.players[oldId];
-      const oldSocket = io.sockets.sockets.get(oldId);
-      if (oldSocket && oldId !== socket.id) {
-        oldSocket.disconnect(true);
-      }
-
-      player = existing;
-      player.id = socket.id;
-      player.connected = true;
-      delete player.disconnectedAt;
-      room.players[socket.id] = player;
-      reconnected = true;
-    } else {
-      if (!Number.isFinite(capital) || capital <= 0 || capital > MAX_STARTING_CASH) {
-        return fail(socket, "Enter a valid starting amount greater than zero for a new player.");
-      }
-      if (Object.keys(room.players).length >= 50) {
-        return fail(socket, "Room is full (50 players maximum).");
-      }
-      player = {
-        id: socket.id,
-        playerNumber: room.nextPlayerNumber++,
-        name: nickname,
-        startingCash: capital,
-        cash: capital,
-        holdings: { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 },
-        trades: [],
-        connected: true
-      };
-      room.players[socket.id] = player;
+    if (!Number.isFinite(capital) || capital <= 0 || capital > MAX_STARTING_CASH) {
+      return fail(socket, "Enter a valid starting amount greater than zero.");
     }
+
+    const id = socket.id;
+    const playerNumber = room.nextPlayerNumber++;
+    room.players[id] = {
+      id,
+      playerNumber,
+      name: nickname,
+      startingCash: capital,
+      cash: capital,
+      holdings: { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 },
+      trades: []
+    };
 
     socket.join(key);
     socket.data.room = key;
@@ -203,10 +203,9 @@ io.on("connection", socket => {
     socket.emit("joined", {
       role: "player",
       key,
-      name: player.name,
-      playerNumber: player.playerNumber,
-      startingCash: player.startingCash,
-      reconnected
+      name: nickname,
+      playerNumber,
+      startingCash: capital
     });
     emitRoom(room);
   });
@@ -258,6 +257,44 @@ io.on("connection", socket => {
     emitRoom(room);
   });
 
+  socket.on("awardReward", ({ playerId, amount } = {}) => {
+    const room = rooms[socket.data.room];
+    if (!room || socket.data.role !== "host" || room.hostId !== socket.id || room.ended) return;
+    const player = room.players[playerId];
+    const reward = Number(amount);
+    if (!player) return fail(socket, "Choose a player to reward.");
+    if (!Number.isFinite(reward) || reward <= 0 || reward > MAX_STARTING_CASH) {
+      return fail(socket, "Enter a valid reward amount greater than zero.");
+    }
+    player.rewardsEarned ||= 0;
+    player.trades ||= [];
+    player.rewardsEarned += reward;
+    const record = {
+      tradeNumber: ++room.tradeCount,
+      playerNumber: player.playerNumber,
+      player: player.name,
+      side: "reward",
+      symbol: "REWARD",
+      quantity: reward,
+      price: reward,
+      total: reward,
+      principalReturned: 0,
+      realizedProfit: 0,
+      realizedLoss: 0,
+      rewardAmount: reward,
+      time: new Date().toISOString(),
+      cashAfter: player.cash,
+      portfolioAfter: portfolio(player, room),
+      totalWealthAfter: totalWealth(player, room)
+    };
+    player.trades.push(record);
+    room.tradeFeed.push(record);
+    if (room.tradeFeed.length > MAX_TRADE_FEED) room.tradeFeed.shift();
+    io.to(room.key).emit("tradeNotice", { player: player.name, side: "reward", symbol: "REWARD", quantity: reward, total: reward });
+    emitRoom(room);
+    socket.emit("notice", { type: "success", message: `Rewarded ${player.name} ${fmtReward(reward)}.` });
+  });
+
   socket.on("trade", ({ side, symbol, quantity } = {}) => {
     const room = rooms[socket.data.room];
     const player = room && room.players[socket.id];
@@ -275,16 +312,50 @@ io.on("connection", socket => {
     const total = amount * coin.price;
     if (!Number.isFinite(total)) return fail(socket, "That trade amount is too large.");
 
+    player.costBasis ||= { BTC: 0, ETH: 0, SOL: 0, DOGE: 0 };
+    player.totalProfit ||= 0;
+    player.totalLoss ||= 0;
+    player.rewardsEarned ||= 0;
+
+    let principalReturned = 0;
+    let realizedProfit = 0;
+    let realizedLoss = 0;
+
     if (side === "buy") {
       if (total > player.cash + 0.00001) return fail(socket, "Not enough available game coins.");
+      const oldQuantity = player.holdings[symbol];
       player.cash -= total;
       player.holdings[symbol] += amount;
+      player.costBasis[symbol] += total;
+      const newQuantity = player.holdings[symbol];
+      // Keep the weighted-average basis stable for partial and repeated buys.
+      if (!Number.isFinite(newQuantity) || newQuantity <= 0) return fail(socket, "Invalid holding quantity.");
     } else if (side === "sell") {
       if (amount > player.holdings[symbol] + 1e-10) {
         return fail(socket, "You don't own enough of this crypto.");
       }
-      player.holdings[symbol] -= amount;
-      player.cash += total;
+      const held = player.holdings[symbol];
+      const basisBeforeSale = player.costBasis[symbol] || 0;
+      const averageCost = held > 0 ? basisBeforeSale / held : 0;
+      principalReturned = Math.min(basisBeforeSale, averageCost * amount);
+      const difference = total - principalReturned;
+      if (difference >= 0) {
+        realizedProfit = difference;
+        player.totalProfit += realizedProfit;
+        // Profit is tracked separately and is not added to spendable cash.
+        player.cash += principalReturned;
+      } else {
+        realizedLoss = -difference;
+        player.totalLoss += realizedLoss;
+        // Loss reduces the returned principal and is also recorded separately.
+        player.cash += principalReturned - realizedLoss;
+      }
+      player.holdings[symbol] = Math.max(0, held - amount);
+      player.costBasis[symbol] = Math.max(0, basisBeforeSale - principalReturned);
+      if (player.holdings[symbol] < 1e-10) {
+        player.holdings[symbol] = 0;
+        player.costBasis[symbol] = 0;
+      }
     } else {
       return;
     }
@@ -298,9 +369,13 @@ io.on("connection", socket => {
       quantity: amount,
       price: coin.price,
       total,
+      principalReturned,
+      realizedProfit,
+      realizedLoss,
       time: new Date().toISOString(),
       cashAfter: player.cash,
-      netWorthAfter: netWorth(player, room)
+      portfolioAfter: portfolio(player, room),
+      totalWealthAfter: totalWealth(player, room)
     };
     player.trades.push(trade);
     room.tradeFeed.push(trade);
@@ -312,7 +387,10 @@ io.on("connection", socket => {
       symbol,
       quantity: amount,
       price: coin.price,
-      total
+      total,
+      principalReturned,
+      realizedProfit,
+      realizedLoss
     });
     emitRoom(room);
   });
@@ -321,8 +399,7 @@ io.on("connection", socket => {
     const room = rooms[socket.data.room];
     if (!room) return;
     if (socket.data.role === "player" && room.players[socket.id]) {
-      room.players[socket.id].connected = false;
-      room.players[socket.id].disconnectedAt = Date.now();
+      delete room.players[socket.id];
       emitRoom(room);
     }
   });

@@ -1,44 +1,26 @@
-# SEY GAMERZ — Crypto Bash
+# SEY GAMERZ Crypto Bash
 
-Multiplayer simulated crypto-trading game built with Node.js, Express, and Socket.IO.
+Multiplayer simulated crypto-trading game built with Express and Socket.IO.
 
-## Run locally
+## Run
 
 ```bash
 npm install
 npm start
 ```
 
-Open `http://localhost:3000` in a browser.
+Open the deployed URL, create a room as host, and share the room key with players. The host starts each round before players can trade.
 
-## Current game rules
+## Financial accounting
 
-- 10 sets, with 1 round per set.
-- Each set lasts 20 minutes.
-- Players choose their own positive starting amount of virtual game cash when joining.
-- The market is simulated and includes Bitcoin (BTC), Ethereum (ETH), Solana (SOL), and Dogecoin (DOGE).
-- No real-money deposits, wallets, or transactions are used.
-- The host is a spectator and controls the game. The host cannot trade.
+- Starting cash is the player's initial virtual capital.
+- Buying crypto deducts the purchase value from cash and adds the purchase value to that coin's cost basis.
+- Holdings show units, average purchase price, cost basis, live price, market value, and unrealized profit/loss.
+- Selling returns the sold units' original cost basis to cash. Realized profit is recorded separately and is not added to spendable cash.
+- A realized loss is deducted from the principal returned to cash and tracked separately. It is not subtracted a second time from wealth.
+- Host-issued rewards are recorded separately; they do not change cash or crypto holdings.
+- Total Wealth = Cash Balance + Crypto Market Value + Realized Profit + Rewards Earned.
+- Leaderboard ranks players by Total Wealth.
+- Player and host trade histories show purchases, sales, principal returned, realized profit/loss, and rewards.
 
-## Host dashboard
-
-The host view omits the player trading terminal and personal portfolio summary. It includes a live trade-floor feed showing each player's number and name, whether they bought or sold, the coin and quantity, execution price, trade value, and time. The feed retains the latest 250 trade events for the current room.
-
-## Deploy
-
-Use `npm install` as the build/install command and `npm start` as the start command on a Node.js web service. The server listens on the `PORT` environment variable supplied by the host platform.
-## Player reconnection
-
-- If a phone call or temporary network interruption disconnects a player, the room keeps that player's game record instead of removing it.
-- The browser automatically attempts to rejoin when its Socket.IO connection returns.
-- If the player refreshes or reopens the game, use the **same room key and exact same nickname** to rejoin. The original player number, virtual cash, holdings, trade history, and progress are restored.
-- A returning player does not need to re-enter starting capital; the saved original amount is kept.
-- The host and leaderboard can see whether a player is online or disconnected.
-- Reconnection works while the game server and room are still running. A server restart or an ended room cannot restore an in-memory room.
-
-
-## Reconnection fix (updated)
-- Fixed a startup bug where saved reconnect details could trigger a JavaScript error before the page initialized.
-- Rejoining with the same room key and nickname now resumes the existing player even if the server has not yet processed the old socket's disconnect event.
-- The old socket is replaced, while the original player number, virtual cash, holdings, trade history, and starting capital are retained.
-- Reconnection requires the same running server process and an active room. Since room/player data is stored in server memory, a Render restart or game end still clears the room state.
+All currencies and trades are simulated virtual game values; no real money or actual cryptocurrency is involved.
